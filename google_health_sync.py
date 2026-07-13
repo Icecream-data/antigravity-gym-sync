@@ -174,6 +174,8 @@ def write_health_v4_exercise(access_token, date_str, total_volume, exercises_sum
         response = requests.post(url, headers=headers, json=payload)
         if response.status_code in [200, 201]:
             print(f"✅ Successfully wrote workout session to Google Health v4 API: {date_str} ({total_volume:.1f} kg)")
+            print("Response from Google Server:")
+            print(json.dumps(response.json(), indent=2))
             return True
         else:
             print(f"Error writing to Google Health v4: {response.status_code} - {response.text}", file=sys.stderr)
