@@ -93,6 +93,8 @@ if "page" not in st.session_state:
     st.session_state.page = "dashboard"
 if "workout_date" not in st.session_state:
     st.session_state.workout_date = datetime.date.today()
+if "temp_exercises" not in st.session_state:
+    st.session_state.temp_exercises = []
 # Calendar display state variables
 if "cal_year" not in st.session_state:
     st.session_state.cal_year = datetime.date.today().year
