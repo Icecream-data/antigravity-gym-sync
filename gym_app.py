@@ -706,7 +706,10 @@ elif st.session_state.page == "create_record":
                         st.toast("🏋️‍♂️ Synced with Google Fit!")
                     else:
                         st.toast("⚠️ Google Fit Sync failed (Check Auth)")
+                        print("Google Fit Sync failed: write_workout_session returned False")
                 except Exception as e:
+                    import traceback
+                    traceback.print_exc()
                     st.toast(f"⚠️ Fit Sync Skipped: {e}")
                 
                 if "temp_exercises" in st.session_state:
