@@ -12,7 +12,7 @@ TOKEN_PATH = "/Users/kanri/Documents/ClaudeCode/google_health_token.json"
 REDIRECT_PORT = 8080
 REDIRECT_URI = f"http://localhost:{REDIRECT_PORT}"
 
-# Scopes extended to include Google Fit Activity Write for logging strength training
+# Scopes extended to include Google Fit Activity Write & Read for full synchronization
 SCOPES = [
     "https://www.googleapis.com/auth/googlehealth.health_metrics_and_measurements.readonly",
     "https://www.googleapis.com/auth/googlehealth.sleep.readonly",
@@ -103,9 +103,7 @@ def do_oauth_flow():
     
     print(f"✅ Auth tokens successfully saved to: {TOKEN_PATH}")
 
-# Helper to load token dict either from local file or Streamlit Secrets (for Cloud deployment)
 def load_tokens():
-    # Attempt to load from Streamlit Secrets (Cloud Environment)
     try:
         import streamlit as st
         if hasattr(st, "secrets") and "google_health_token" in st.secrets:
@@ -113,14 +111,12 @@ def load_tokens():
     except Exception:
         pass
 
-    # Load from local token JSON file
     if os.path.exists(TOKEN_PATH):
         with open(TOKEN_PATH, 'r') as f:
             return json.load(f)
     return None
 
 def save_tokens(tokens):
-    # Only save locally; Streamlit Secrets is read-only on Cloud
     if os.path.exists(TOKEN_PATH) or os.path.exists(os.path.dirname(TOKEN_PATH)):
         with open(TOKEN_PATH, 'w') as f:
             json.dump(tokens, f, indent=2)
@@ -151,9 +147,71 @@ def get_access_token():
     save_tokens(tokens)
     return tokens['access_token']
 
-# Write Workout Session to Google Fit API (Activity Type 97: Strength Training)
+# Create a Fitness Data Source for Activity Segments if it doesn't exist
+# This is REQUIRED because Google Fit app hides sessions that have no actual activity segment datapoints.
+def get_or_create_data_source(access_token):
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json"
+    }
+    
+    # Define our custom activity segment data source
+    data_source_payload = {
+        "dataStreamName": "ActivitySegment",
+        "type": "raw",
+        "application": {
+            "name": "Antigravity Gym Sync"
+        },
+        "dataType": {
+            "name": "com.google.activity.segment",
+            "field": [
+                {
+                    "name": "activity",
+                    "format": "integer"
+                }
+            ]
+        }
+    }
+    
+    url = "https://www.googleapis.com/fitness/v1/users/me/dataSources"
+    
+    try:
+        response = requests.post(url, headers=headers, json=data_source_payload)
+        if response.status_code in [200, 201]:
+            ds_info = response.json()
+            return ds_info.get("dataStreamId")
+        elif response.status_code == 409:
+            # Conflict means it already exists. We reconstruct the standard ID format.
+            # ID Format: raw:com.google.activity.segment:projectId:Antigravity Gym Sync:ActivitySegment
+            # We fetch all data sources to find our matching stream.
+            get_response = requests.get(url, headers=headers)
+            if get_response.status_code == 200:
+                sources = get_response.json().get("dataSource", [])
+                for src in sources:
+                    if src.get("dataStreamName") == "ActivitySegment" and src.get("application", {}).get("name") == "Antigravity Gym Sync":
+                        return src.get("dataStreamId")
+            return "raw:com.google.activity.segment:486610225594:Antigravity Gym Sync:ActivitySegment"
+        else:
+            print(f"Warning: Failed to create fitness data source. Status: {response.status_code}", file=sys.stderr)
+            return None
+    except Exception as e:
+        print(f"Exception during data source creation: {e}", file=sys.stderr)
+        return None
+
+# Write Workout Session & Datapoints (REQUIRED for visualization on Google Fit app)
 def write_workout_session(date_str, total_volume, exercises_summary=""):
     access_token = get_access_token()
+    
+    # 1. Ensure the Data Source exists and fetch its Stream ID
+    data_stream_id = get_or_create_data_source(access_token)
+    if not data_stream_id:
+        print("Error: Could not retrieve or create Google Fit Data Source.", file=sys.stderr)
+        return False
+        
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json"
+    }
     
     # Define Default Session Time (18:00 - 19:00 JST)
     start_time_str = f"{date_str}T18:00:00+09:00"
@@ -162,11 +220,44 @@ def write_workout_session(date_str, total_volume, exercises_summary=""):
     s_dt = datetime.datetime.fromisoformat(start_time_str)
     e_dt = datetime.datetime.fromisoformat(end_time_str)
     
-    # Calculate timestamps in milliseconds
+    # Timestamps in milliseconds
     start_millis = int(s_dt.timestamp() * 1000)
     end_millis = int(e_dt.timestamp() * 1000)
     
-    # Strength training session request payload
+    # Timestamps in nanoseconds (for datapoints)
+    start_nanos = start_millis * 1000000
+    end_nanos = end_millis * 1000000
+    
+    # 2. Write Datapoint to the Activity Segment Dataset
+    # This proves to the Google Fit app that the session is not empty, causing it to display in the UI Journal.
+    dataset_url = f"https://www.googleapis.com/fitness/v1/users/me/dataSources/{data_stream_id}/datasets/{start_nanos}-{end_nanos}"
+    dataset_payload = {
+        "dataSourceId": data_stream_id,
+        "minStartTimeNs": start_nanos,
+        "maxEndTimeNs": end_nanos,
+        "point": [
+            {
+                "startTimeNanos": start_nanos,
+                "endTimeNanos": end_nanos,
+                "dataTypeName": "com.google.activity.segment",
+                "value": [
+                    {
+                        "intVal": 97  # 97 represents Strength Training
+                    }
+                ]
+            }
+        ]
+    }
+    
+    try:
+        ds_response = requests.patch(dataset_url, headers=headers, json=dataset_payload)
+        if ds_response.status_code not in [200, 201]:
+            print(f"Warning: Failed to write activity segment datapoint: {ds_response.status_code} - {ds_response.text}", file=sys.stderr)
+            # Proceed anyway, sometimes the session alone might work for some clients
+    except Exception as e:
+        print(f"Exception during datapoint write: {e}", file=sys.stderr)
+
+    # 3. Write Workout Session (Metadata Wrapper)
     session_id = f"antigravity-gym-session-{date_str}"
     session_payload = {
         "id": session_id,
@@ -178,17 +269,12 @@ def write_workout_session(date_str, total_volume, exercises_summary=""):
         "activityType": 97  # 97 represents Strength Training
     }
     
-    headers = {
-        "Authorization": f"Bearer {access_token}",
-        "Content-Type": "application/json"
-    }
-    
-    url = f"https://www.googleapis.com/fitness/v1/users/me/sessions/{session_id}"
+    session_url = f"https://www.googleapis.com/fitness/v1/users/me/sessions/{session_id}"
     
     try:
-        response = requests.put(url, headers=headers, json=session_payload)
+        response = requests.put(session_url, headers=headers, json=session_payload)
         if response.status_code in [200, 201]:
-            print(f"✅ Successfully wrote workout session to Google Fit: {session_id}")
+            print(f"✅ Successfully wrote workout session to Google Fit Jurnal: {session_id}")
             return True
         else:
             print(f"Error writing workout session: {response.status_code} - {response.text}", file=sys.stderr)
@@ -205,7 +291,7 @@ def get_health_data(target_date_str):
         "Content-Type": "application/json"
     }
 
-    # 1. Retrieve Weight Data
+    # Retrieve Weight Data
     weight_url = "https://health.googleapis.com/v4/users/me/dataTypes/weight/dataPoints"
     weight = None
     try:
@@ -226,7 +312,7 @@ def get_health_data(target_date_str):
     except Exception as e:
         print(f"Warning: Error parsing weight data: {e}", file=sys.stderr)
 
-    # 2. Retrieve Sleep Data
+    # Retrieve Sleep Data
     sleep_url = "https://health.googleapis.com/v4/users/me/dataTypes/sleep/dataPoints"
     sleep_minutes = None
     sleep_start_str = None
@@ -282,7 +368,6 @@ if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "--auth":
         do_oauth_flow()
     elif len(sys.argv) > 3 and sys.argv[1] == "--write-workout":
-        # Argument format: --write-workout <date_str> <total_volume> "<exercises_summary>"
         date_param = sys.argv[2]
         volume_param = float(sys.argv[3])
         summary_param = sys.argv[4] if len(sys.argv) > 4 else ""
