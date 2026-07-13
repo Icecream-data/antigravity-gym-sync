@@ -12,12 +12,11 @@ TOKEN_PATH = "/Users/kanri/Documents/ClaudeCode/google_health_token.json"
 REDIRECT_PORT = 8080
 REDIRECT_URI = f"http://localhost:{REDIRECT_PORT}"
 
-# Scopes verified for Google Health get and Google Fit write
+# Pure Google Health API v4 Scopes (No legacy fitness scopes to avoid 403 conflicts)
 SCOPES = [
     "https://www.googleapis.com/auth/googlehealth.health_metrics_and_measurements.readonly",
     "https://www.googleapis.com/auth/googlehealth.sleep.readonly",
-    "https://www.googleapis.com/auth/fitness.activity.write",
-    "https://www.googleapis.com/auth/fitness.activity.read"
+    "https://www.googleapis.com/auth/googlehealth.activity_and_fitness.writeonly"
 ]
 
 authorization_code = None
@@ -69,7 +68,7 @@ def do_oauth_flow():
     }
     url = f"{auth_uri}?{urllib.parse.urlencode(params)}"
 
-    print("Opening browser for Google Fit & Health authentication...")
+    print("Opening browser for Google Health API v4 authentication...")
     print(f"URL: {url}")
     webbrowser.open(url)
 
@@ -147,131 +146,46 @@ def get_access_token():
     save_tokens(tokens)
     return tokens['access_token']
 
-# Create a Fitness Data Source for Activity Segments if it doesn't exist
-def get_or_create_data_source(access_token):
+# Write Workout Session to Google Health API v4 (Fitbit/Pixel Watch backend)
+# Uses clean googlehealth.activity_and_fitness.writeonly scope.
+def write_health_v4_exercise(access_token, date_str, total_volume, exercises_summary):
     headers = {
         "Authorization": f"Bearer {access_token}",
         "Content-Type": "application/json"
     }
     
-    data_source_payload = {
-        "dataStreamName": "ActivitySegment",
-        "type": "raw",
-        "application": {
-            "name": "Antigravity Gym Sync"
-        },
-        "dataType": {
-            "name": "com.google.activity.segment",
-            "field": [
-                {
-                    "name": "activity",
-                    "format": "integer"
-                }
-            ]
+    # 18:00 - 19:00 JST (09:00 - 10:00 UTC)
+    start_time_utc = f"{date_str}T09:00:00Z"
+    end_time_utc = f"{date_str}T10:00:00Z"
+    
+    payload = {
+        "exercise": {
+            "exerciseType": "STRENGTH_TRAINING",
+            "interval": {
+                "startTime": start_time_utc,
+                "endTime": end_time_utc
+            }
         }
     }
     
-    url = "https://www.googleapis.com/fitness/v1/users/me/dataSources"
+    url = "https://health.googleapis.com/v4/users/me/dataTypes/exercise/dataPoints"
     
     try:
-        response = requests.post(url, headers=headers, json=data_source_payload)
+        response = requests.post(url, headers=headers, json=payload)
         if response.status_code in [200, 201]:
-            ds_info = response.json()
-            return ds_info.get("dataStreamId")
-        elif response.status_code == 409:
-            get_response = requests.get(url, headers=headers)
-            if get_response.status_code == 200:
-                sources = get_response.json().get("dataSource", [])
-                for src in sources:
-                    if src.get("dataStreamName") == "ActivitySegment" and src.get("application", {}).get("name") == "Antigravity Gym Sync":
-                        return src.get("dataStreamId")
-            return "raw:com.google.activity.segment:486610225594:Antigravity Gym Sync:ActivitySegment"
-        else:
-            print(f"Warning: Failed to create fitness data source. Status: {response.status_code}", file=sys.stderr)
-            return None
-    except Exception as e:
-        print(f"Exception during data source creation: {e}", file=sys.stderr)
-        return None
-
-# Write Workout Session to Google Fit Jurnal (Legacy but standard compatible Google Fit API v1)
-# Writes both the Activity Segment Datapoint (so it shows in Fit App) and the Session wrapper.
-def write_workout_session(date_str, total_volume, exercises_summary=""):
-    access_token = get_access_token()
-    
-    # 1. Get or Create the Activity Segment Data Source
-    data_stream_id = get_or_create_data_source(access_token)
-    if not data_stream_id:
-        print("Error: Could not retrieve or create Google Fit Data Source.", file=sys.stderr)
-        return False
-        
-    headers = {
-        "Authorization": f"Bearer {access_token}",
-        "Content-Type": "application/json"
-    }
-    
-    # Define Default Session Time (18:00 - 19:00 JST)
-    start_time_str = f"{date_str}T18:00:00+09:00"
-    end_time_str = f"{date_str}T19:00:00+09:00"
-    s_dt = datetime.datetime.fromisoformat(start_time_str)
-    e_dt = datetime.datetime.fromisoformat(end_time_str)
-    start_millis = int(s_dt.timestamp() * 1000)
-    end_millis = int(e_dt.timestamp() * 1000)
-    start_nanos = start_millis * 1000000
-    end_nanos = end_millis * 1000000
-    
-    # 2. Write Datapoint to the Activity Segment Dataset
-    # This guarantees that the session has exercise duration content, forcing Google Fit to display it.
-    dataset_url = f"https://www.googleapis.com/fitness/v1/users/me/dataSources/{data_stream_id}/datasets/{start_nanos}-{end_nanos}"
-    dataset_payload = {
-        "dataSourceId": data_stream_id,
-        "minStartTimeNs": start_nanos,
-        "maxEndTimeNs": end_nanos,
-        "point": [
-            {
-                "startTimeNanos": start_nanos,
-                "endTimeNanos": end_nanos,
-                "dataTypeName": "com.google.activity.segment",
-                "value": [
-                    {
-                        "intVal": 97 # 97 represents Strength Training
-                    }
-                ]
-            }
-        ]
-    }
-    
-    try:
-        ds_response = requests.patch(dataset_url, headers=headers, json=dataset_payload)
-        if ds_response.status_code not in [200, 201]:
-            print(f"Warning: Failed to write activity segment datapoint: {ds_response.status_code} - {ds_response.text}", file=sys.stderr)
-    except Exception as e:
-        print(f"Exception during datapoint write: {e}", file=sys.stderr)
-
-    # 3. Write Workout Session
-    session_id = f"antigravity-gym-session-{date_str}"
-    session_payload = {
-        "id": session_id,
-        "name": f"Gym Workout ({date_str})",
-        "description": f"Logged via Antigravity Gym. Total Volume: {total_volume:.1f} kg. Details: {exercises_summary}",
-        "startTimeMillis": start_millis,
-        "endTimeMillis": end_millis,
-        "version": 1,
-        "activityType": 97 # 97 represents Strength Training
-    }
-    
-    session_url = f"https://www.googleapis.com/fitness/v1/users/me/sessions/{session_id}"
-    
-    try:
-        response = requests.put(session_url, headers=headers, json=session_payload)
-        if response.status_code in [200, 201]:
-            print(f"✅ Successfully wrote workout session to Google Fit Jurnal: {session_id}")
+            print(f"✅ Successfully wrote workout session to Google Health v4 API: {date_str} ({total_volume:.1f} kg)")
             return True
         else:
-            print(f"Error writing workout session: {response.status_code} - {response.text}", file=sys.stderr)
+            print(f"Error writing to Google Health v4: {response.status_code} - {response.text}", file=sys.stderr)
             return False
     except Exception as e:
-        print(f"Exception during workout session write: {e}", file=sys.stderr)
+        print(f"Exception during Google Health v4 write: {e}", file=sys.stderr)
         return False
+
+# Master Write function (publishes solely to Google Health API v4)
+def write_workout_session(date_str, total_volume, exercises_summary=""):
+    access_token = get_access_token()
+    return write_health_v4_exercise(access_token, date_str, total_volume, exercises_summary)
 
 def get_health_data(target_date_str):
     access_token = get_access_token()
