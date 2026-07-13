@@ -158,13 +158,17 @@ def write_health_v4_exercise(access_token, date_str, total_volume, exercises_sum
     start_time_utc = f"{date_str}T09:00:00Z"
     end_time_utc = f"{date_str}T10:00:00Z"
     
+    # 📝 Google Health's Notes field to push volume and exercise details to Google Cloud
+    notes_text = f"Total volume: {total_volume:.1f} kg. Exercises: {exercises_summary}"
+    
     payload = {
         "exercise": {
             "exerciseType": "STRENGTH_TRAINING",
             "interval": {
                 "startTime": start_time_utc,
                 "endTime": end_time_utc
-            }
+            },
+            "notes": notes_text
         }
     }
     
