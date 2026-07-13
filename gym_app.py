@@ -694,6 +694,19 @@ elif st.session_state.page == "create_record":
                 }
                 save_records(records)
                 st.success("Workout saved successfully!")
+                
+                # Automatically sync workout details to Google Fit via API
+                try:
+                    import google_health_sync
+                    ex_summary = ", ".join([ex["name"] for ex in st.session_state.temp_exercises])
+                    sync_success = google_health_sync.write_workout_session(date_key, total_lifted, ex_summary)
+                    if sync_success:
+                        st.toast("🏋️‍♂️ Synced with Google Fit!")
+                    else:
+                        st.toast("⚠️ Google Fit Sync failed (Check Auth)")
+                except Exception as e:
+                    st.toast(f"⚠️ Fit Sync Skipped: {e}")
+                
                 if "temp_exercises" in st.session_state:
                     del st.session_state.temp_exercises
                 st.session_state.page = "calendar"
