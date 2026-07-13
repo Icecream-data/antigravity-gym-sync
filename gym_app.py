@@ -609,6 +609,28 @@ elif st.session_state.page == "create_record":
         
     st.write("---")
     
+    if "sync_result" in st.session_state:
+        st.subheader("💾 Workout Sync Status")
+        
+        # Local save result
+        st.success("✅ Workout details saved locally!")
+        
+        # Google Health sync result
+        res = st.session_state.sync_result
+        if res["status"] == "success":
+            st.info(res["message"])
+        else:
+            st.error(res["message"])
+            
+        st.write("")
+        if st.button("⬅️ Back to Calendar", type="primary", use_container_width=True):
+            if "temp_exercises" in st.session_state:
+                del st.session_state.temp_exercises
+            del st.session_state.sync_result
+            st.session_state.page = "calendar"
+            st.rerun()
+        st.stop()
+    
     col1, col2 = st.columns(2)
     with col1:
         workout_date = st.date_input("Workout Date", st.session_state.workout_date)
@@ -703,18 +725,23 @@ elif st.session_state.page == "create_record":
                     ex_summary = ", ".join([ex["name"] for ex in st.session_state.temp_exercises])
                     sync_success = google_health_sync.write_workout_session(date_key, total_lifted, ex_summary)
                     if sync_success:
-                        st.toast("🏋️‍♂️ Synced with Google Fit!")
+                        st.session_state.sync_result = {
+                            "status": "success",
+                            "message": f"🏋️‍♂️ Successfully synced workout to Google Health v4! ({total_lifted:.1f} kg)"
+                        }
                     else:
-                        st.toast("⚠️ Google Fit Sync failed (Check Auth)")
-                        print("Google Fit Sync failed: write_workout_session returned False")
+                        st.session_state.sync_result = {
+                            "status": "failed",
+                            "message": "⚠️ Google Health Sync failed. Please check your Secrets configuration."
+                        }
                 except Exception as e:
                     import traceback
                     traceback.print_exc()
-                    st.toast(f"⚠️ Fit Sync Skipped: {e}")
+                    st.session_state.sync_result = {
+                        "status": "error",
+                        "message": f"⚠️ Google Health Sync error: {str(e)}"
+                    }
                 
-                if "temp_exercises" in st.session_state:
-                    del st.session_state.temp_exercises
-                st.session_state.page = "calendar"
                 st.rerun()
         with col_act2:
             if st.button("🗑️ Clear All Draft", key="btn_clear_all", use_container_width=True):
